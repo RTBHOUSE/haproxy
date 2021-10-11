@@ -169,6 +169,17 @@ enum srv_initaddr {
 #define SRV_STATUS_QUEUED   4   /* the/all server(s) are saturated but the connection was queued */
 
 /* various constants */
+
+/* The scale factor between user weight and effective weight allows smooth
+ * weight modulation even with small weights (eg: 1). It should not be too high
+ * though because it limits the number of servers in FWRR mode in order to
+ * prevent any integer overflow. The max number of servers per backend is
+ * limited to about (2^32-1)/256^2/scale ~= 65535.9999/scale. A scale of 16
+ * looks like a good value, as it allows 4095 servers per backend while leaving
+ * modulation steps of about 6% for servers with the lowest weight (1).
+ */
+#define BE_WEIGHT_SCALE 16
+
 #define SRV_UWGHT_RANGE 256
 #define SRV_UWGHT_MAX   (SRV_UWGHT_RANGE)
 #define SRV_EWGHT_RANGE (SRV_UWGHT_RANGE * BE_WEIGHT_SCALE)
@@ -296,6 +307,7 @@ struct server {
 
 	struct eb_root *lb_tree;                /* we want to know in what tree the server is */
 	struct tree_occ *lb_nodes;              /* lb_nodes_tot * struct tree_occ */
+	struct fwlcgr_group *lb_group;          /* load-balancing group for leastconngr */
 	unsigned lb_nodes_tot;                  /* number of allocated lb_nodes (C-HASH) */
 	unsigned lb_nodes_now;                  /* number of lb_nodes placed in the tree (C-HASH) */
 

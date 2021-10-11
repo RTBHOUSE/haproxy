@@ -60,6 +60,7 @@
 #include <haproxy/lb_chash.h>
 #include <haproxy/lb_fas.h>
 #include <haproxy/lb_fwlc.h>
+#include <haproxy/lb_fwlcgr.h>
 #include <haproxy/lb_fwrr.h>
 #include <haproxy/lb_map.h>
 #include <haproxy/listener.h>
@@ -3462,6 +3463,9 @@ out_uri_auth_compat:
 			if ((curproxy->lbprm.algo & BE_LB_PARM) == BE_LB_CB_LC) {
 				curproxy->lbprm.algo |= BE_LB_LKUP_LCTREE | BE_LB_PROP_DYN;
 				fwlc_init_server_tree(curproxy);
+			} else if ((curproxy->lbprm.algo & BE_LB_PARM) == BE_LB_CB_LCGR) {
+				curproxy->lbprm.algo |= BE_LB_LKUP_LCGRTREE | BE_LB_PROP_DYN;
+				fwlcgr_init_group_tree(curproxy);
 			} else {
 				curproxy->lbprm.algo |= BE_LB_LKUP_FSTREE | BE_LB_PROP_DYN;
 				fas_init_server_tree(curproxy);

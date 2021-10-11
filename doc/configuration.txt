@@ -3913,6 +3913,16 @@ balance url_param <param> [check_post]
                   also consider the number of queued connections in addition to
                   the established ones in order to minimize queuing.
 
+      leastconngr Considers all servers with the same weight to form a group,
+                  assigns the connection to the group with the lowest total
+                  number of connections in proportion to the group size and
+                  weight and then to the server within the group that has the
+                  lowest number of connections. This is similar in principle to
+                  leastconn but can improve the accuracy of the weights when
+                  used in a cluster of load balancers that all use the same
+                  backend servers and where several backend servers share the
+                  same weights.
+
       first       The first server with available connection slots receives the
                   connection. The servers are chosen from the lowest numeric
                   identifier to the highest (see server parameter "id"), which

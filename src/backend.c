@@ -38,6 +38,7 @@
 #include <haproxy/lb_chash.h>
 #include <haproxy/lb_fas.h>
 #include <haproxy/lb_fwlc.h>
+#include <haproxy/lb_fwlcgr.h>
 #include <haproxy/lb_fwrr.h>
 #include <haproxy/lb_map.h>
 #include <haproxy/log.h>
@@ -677,6 +678,10 @@ int assign_server(struct stream *s)
 
 		case BE_LB_LKUP_LCTREE:
 			srv = fwlc_get_next_server(s->be, prev_srv);
+			break;
+
+		case BE_LB_LKUP_LCGRTREE:
+			srv = fwlcgr_get_next_server(s->be, prev_srv);
 			break;
 
 		case BE_LB_LKUP_CHTREE:
@@ -2465,6 +2470,8 @@ const char *backend_lb_algo_str(int algo) {
 		return "first";
 	else if (algo == BE_LB_ALGO_LC)
 		return "leastconn";
+	else if (algo == BE_LB_ALGO_LCGR)
+		return "leastconngr";
 	else if (algo == BE_LB_ALGO_SH)
 		return "source";
 	else if (algo == BE_LB_ALGO_UH)
@@ -2512,6 +2519,10 @@ int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 	else if (strcmp(args[0], "leastconn") == 0) {
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
 		curproxy->lbprm.algo |= BE_LB_ALGO_LC;
+	}
+	else if (strcmp(args[0], "leastconngr") == 0) {
+		curproxy->lbprm.algo &= ~BE_LB_ALGO;
+		curproxy->lbprm.algo |= BE_LB_ALGO_LCGR;
 	}
 	else if (!strncmp(args[0], "random", 6)) {
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;

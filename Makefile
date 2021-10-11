@@ -878,19 +878,19 @@ OBJS += src/mux_h2.o src/mux_fcgi.o src/http_ana.o src/mux_h1.o src/stream.o   \
         src/extcheck.o src/channel.o src/proto_sockpair.o src/fd.o             \
         src/compression.o src/mqtt.o src/tcp_act.o src/raw_sock.o              \
         src/frontend.o src/http_conv.o src/xprt_handshake.o src/pool.o         \
-        src/applet.o src/mailers.o src/lb_fwrr.o src/lb_fwlc.o src/lb_fas.o    \
-        src/proto_uxst.o src/http.o src/action.o src/protocol.o src/thread.o   \
-        src/sock_unix.o src/proto_udp.o src/lb_map.o src/sock_inet.o src/lru.o \
-        src/cfgparse-tcp.o src/cfgdiag.o src/proto_uxdg.o src/ev_select.o      \
-        src/cfgparse-unix.o src/uri_normalizer.o src/ebmbtree.o src/sha1.o     \
-        src/time.o src/signal.o src/mworker-prog.o src/hpack-dec.o src/fix.o   \
-        src/arg.o src/eb64tree.o src/chunk.o src/shctx.o src/regex.o           \
-        src/fcgi.o src/eb32tree.o src/eb32sctree.o src/dynbuf.o src/uri_auth.o \
-        src/hpack-tbl.o src/ebimtree.o src/auth.o src/ebsttree.o src/clock.o   \
-        src/ebistree.o src/base64.o src/wdt.o src/pipe.o src/http_acl.o        \
-        src/hpack-enc.o src/dict.o src/dgram.o src/init.o src/hpack-huff.o     \
-        src/freq_ctr.o src/ebtree.o src/hash.o src/version.o src/errors.o      \
-        src/http_client.o
+        src/applet.o src/mailers.o src/lb_fwrr.o src/lb_fwlc.o src/lb_fwlcgr.o \
+	src/lb_fas.o src/proto_uxst.o src/http.o src/action.o src/protocol.o   \
+	src/thread.o src/sock_unix.o src/proto_udp.o src/lb_map.o              \
+	src/sock_inet.o src/lru.o src/cfgparse-tcp.o src/cfgdiag.o             \
+	src/proto_uxdg.o src/ev_select.o src/cfgparse-unix.o                   \
+	src/uri_normalizer.o src/ebmbtree.o src/sha1.o src/time.o src/signal.o \
+	src/mworker-prog.o src/hpack-dec.o src/fix.o src/arg.o src/eb64tree.o  \
+	src/chunk.o src/shctx.o src/regex.o src/fcgi.o src/eb32tree.o          \
+	src/eb32sctree.o src/dynbuf.o src/uri_auth.o src/hpack-tbl.o           \
+	src/ebimtree.o src/auth.o src/ebsttree.o src/clock.o src/ebistree.o    \
+	src/base64.o src/wdt.o src/pipe.o src/http_acl.o src/hpack-enc.o       \
+	src/dict.o src/dgram.o src/init.o src/hpack-huff.o src/freq_ctr.o      \
+	src/ebtree.o src/hash.o src/version.o src/errors.o src/http_client.o
 
 ifneq ($(TRACE),)
 OBJS += src/calltrace.o
