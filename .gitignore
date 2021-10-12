@@ -31,6 +31,7 @@
 !/debian
 !/scripts
 !/reg-tests
+!/lbtest
 # Reject some generic files
 *.o
 *.a
@@ -53,3 +54,4 @@ dev/hpack/gen-rht
 /src/dlmalloc.c
 /tests/test_hashes
 doc/lua-api/_build
+lbtest/haproxy_*.cfg
