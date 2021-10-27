@@ -308,6 +308,7 @@ struct server {
 	struct tree_occ *lb_nodes;              /* lb_nodes_tot * struct tree_occ */
 	unsigned lb_nodes_tot;                  /* number of allocated lb_nodes (C-HASH) */
 	unsigned lb_nodes_now;                  /* number of lb_nodes placed in the tree (C-HASH) */
+	struct fwlc_bins *bins;                 /* weight bins tracking (FWLC) */
 
 	const struct netns_entry *netns;        /* contains network namespace name or NULL. Network namespace comes from configuration */
 	struct xprt_ops *xprt;                  /* transport-layer operations */
