@@ -400,6 +400,7 @@ static const char *lock_label(enum lock_label label)
 	case PROXY_LOCK:           return "PROXY";
 	case SERVER_LOCK:          return "SERVER";
 	case LBPRM_LOCK:           return "LBPRM";
+	case FWLC_WEIGHTS_LOCK:    return "FWLC_WEIGHTS";
 	case SIGNALS_LOCK:         return "SIGNALS";
 	case STK_TABLE_LOCK:       return "STK_TABLE";
 	case STK_SESS_LOCK:        return "STK_SESS";

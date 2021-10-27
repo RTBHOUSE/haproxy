@@ -16,87 +16,166 @@
 #include <haproxy/queue.h>
 #include <haproxy/server-t.h>
 
+DECLARE_STATIC_POOL(fwlc_weights_pool, "fwlc_weight", sizeof(struct fwlc_weight));
 
-/* Remove a server from a tree. It must have previously been dequeued. This
- * function is meant to be called when a server is going down or has its
- * weight disabled.
- *
- * The server's lock and the lbprm's lock must be held.
- */
-static inline void fwlc_remove_from_tree(struct server *s)
-{
-	s->lb_tree = NULL;
+static inline void fwlc_register_uweight(struct proxy *p, unsigned uweight) {
+	struct eb_root init_head = EB_ROOT;
+	struct fwlc_weight *weight = pool_alloc(fwlc_weights_pool);
+	struct eb32_node *existing_weights_node;
+
+	if (!weight) {
+		return;
+	}
+
+	weight->weights_node.key = uweight;
+
+	weight->act.total_inflight = 0;
+	weight->act.total_eweight = 0;
+	weight->act.srv_tree = init_head;
+	weight->act.leastconn_tree = &p->lbprm.fwlc.act_leastconn;
+
+	weight->bck.total_inflight = 0;
+	weight->bck.total_eweight = 0;
+	weight->bck.srv_tree = init_head;
+	weight->bck.leastconn_tree = &p->lbprm.fwlc.bck_leastconn;
+
+	HA_RWLOCK_WRLOCK(FWLC_WEIGHTS_LOCK, &p->lbprm.fwlc.weights_lock);
+	/* Another thread could have already added the group */
+	existing_weights_node = eb32_lookup(&p->lbprm.fwlc.weights, uweight);
+	if (existing_weights_node == NULL)
+		eb32_insert(&p->lbprm.fwlc.weights, &weight->weights_node);
+	HA_RWLOCK_WRUNLOCK(FWLC_WEIGHTS_LOCK, &p->lbprm.fwlc.weights_lock);
+
+	if (existing_weights_node != NULL)
+		pool_free(fwlc_weights_pool, weight);
 }
 
-/* simply removes a server from a tree.
+/* Remove the server from the group. If group became empty, it will be removed
+ * from the tree for lookup by weight and from the tree for leastconn lookup.
  *
  * The lbprm's lock must be held.
  */
-static inline void fwlc_dequeue_srv(struct server *s)
-{
-	eb32_delete(&s->lb_node);
+static inline void fwlc_dequeue_srv(struct server *srv) {
+	unsigned long long eweight = _HA_ATOMIC_LOAD(&srv->cur_eweight);
+	struct fwlc_group *group = srv->lb_group;
+
+	group->total_inflight -= srv->lb_node.key;
+	group->total_eweight -= eweight;
+
+	srv->lb_group = NULL;
+	eb32_delete(&srv->lb_node);
+	srv->lb_tree = NULL;
+
+	eb64_delete(&group->leastconn_node);
+	if (group->total_eweight > 0) {
+		group->leastconn_node.key = (group->total_inflight << 16) / (group->total_eweight);
+		eb64_insert(group->leastconn_tree, &group->leastconn_node);
+	}
 }
 
-/* Queue a server in its associated tree, assuming the <eweight> is >0.
- * Servers are sorted by (#conns+1)/weight. To ensure maximum accuracy,
- * we use (#conns+1)*SRV_EWGHT_MAX/eweight as the sorting key. The reason
- * for using #conns+1 is to sort by weights in case the server is picked
- * and not before it is picked. This provides a better load accuracy for
- * low connection counts when weights differ and makes sure the round-robin
- * applies between servers of highest weight first. However servers with no
- * connection are always picked first so that under low loads, it's not
- * always the single server with the highest weight that gets picked.
+/* Find or create the server group for <srv> pending new weight. Reposition or
+ * insert the group into two trees: one for lookup by weight and another for
+ * looking up the least connected group. Finally, reposition or insert the
+ * server into the server tree of the group.
  *
- * NOTE: Depending on the calling context, we use s->next_eweight or
- *       s->cur_eweight. The next value is used when the server state is updated
- *       (because the weight changed for instance). During this step, the server
- *       state is not yet committed. The current value is used to reposition the
- *       server in the tree. This happens when the server is used.
+ * srv->next_eweight is used as the servers weight since at this stage the
+ * server state is not yet committed.
  *
  * The lbprm's lock must be held.
  */
-static inline void fwlc_queue_srv(struct server *s, unsigned int eweight)
-{
-	unsigned int inflight = _HA_ATOMIC_LOAD(&s->served) + _HA_ATOMIC_LOAD(&s->queue.length);
+static inline void fwlc_queue_srv(struct server *srv) {
+	unsigned long long inflight = _HA_ATOMIC_LOAD(&srv->served) + _HA_ATOMIC_LOAD(&srv->queue.length);
+	unsigned long long eweight = _HA_ATOMIC_LOAD(&srv->next_eweight);
 
-	s->lb_node.key = inflight ? (inflight + 1) * SRV_EWGHT_MAX / eweight : 0;
-	eb32_insert(s->lb_tree, &s->lb_node);
+	struct eb32_node *weights_node;
+	struct fwlc_weight *weight;
+	struct fwlc_group *group;
+
+	/* Find the group for this weight */
+	HA_RWLOCK_RDLOCK(FWLC_WEIGHTS_LOCK, &srv->proxy->lbprm.fwlc.weights_lock);
+	weights_node = eb32_lookup(&srv->proxy->lbprm.fwlc.weights, srv->uweight);
+	weight = eb32_entry(weights_node, struct fwlc_weight, weights_node);
+	HA_RWLOCK_RDUNLOCK(FWLC_WEIGHTS_LOCK, &srv->proxy->lbprm.fwlc.weights_lock);
+
+	/* Select the appropiate group */
+	if (srv->flags & SRV_F_BACKUP) {
+		group = &weight->bck;
+	} else {
+		group = &weight->act;
+	}
+
+	/* Dequeue if necessary */
+	if (group->total_eweight > 0)
+		eb64_delete(&group->leastconn_node);
+
+	/* Add servers eweight */
+	group->total_eweight += eweight;
+
+	/* Reposition server in the server tree */
+	eb32_delete(&srv->lb_node);
+	srv->lb_node.key = inflight;
+	eb32_insert(&group->srv_tree, &srv->lb_node);
+
+	/* Update server pointers */
+	srv->lb_group = group;
+	srv->lb_tree = &group->srv_tree;
+
+	/* Re-key the group with inflight/(size*weight), extending everything
+	 * to uint64_t and multipling nominator by 2^32 to get maximum
+	 * precision.
+	 */
+	group->total_inflight += srv->lb_node.key;
+	group->leastconn_node.key = (group->total_inflight << 16) / group->total_eweight;
+	eb64_insert(group->leastconn_tree, &group->leastconn_node);
 }
 
-/* Re-position the server in the FWLC tree after it has been assigned one
- * connection or after it has released one. Note that it is possible that
- * the server has been moved out of the tree due to failed health-checks.
+/* Re-position the server and the group it belongs to after the server has been
+ * assigned one connection or after it has released one. Note that it is
+ * possible that the server has been moved out of the tree due to failed
+ * health-checks.
+ *
  * The lbprm's lock will be used.
  */
-static void fwlc_srv_reposition(struct server *s)
+static void fwlc_reposition_srv_and_group(struct server *srv)
 {
-	unsigned int inflight = _HA_ATOMIC_LOAD(&s->served) + _HA_ATOMIC_LOAD(&s->queue.length);
-	unsigned int eweight = _HA_ATOMIC_LOAD(&s->cur_eweight);
-	unsigned int new_key = inflight ? (inflight + 1) * SRV_EWGHT_MAX / (eweight ? eweight : 1) : 0;
+	unsigned long long inflight = _HA_ATOMIC_LOAD(&srv->served) + _HA_ATOMIC_LOAD(&srv->queue.length);
+	unsigned long long eweight = _HA_ATOMIC_LOAD(&srv->cur_eweight);
 
 	/* some calls will be made for no change (e.g connect_server() after
 	 * assign_server(). Let's check that first.
 	 */
-	if (s->lb_node.node.leaf_p && eweight && s->lb_node.key == new_key)
+	if (srv->lb_node.node.leaf_p && eweight && srv->lb_node.key == inflight)
 		return;
 
-	HA_RWLOCK_WRLOCK(LBPRM_LOCK, &s->proxy->lbprm.lock);
-	if (s->lb_tree) {
+	HA_RWLOCK_WRLOCK(LBPRM_LOCK, &srv->proxy->lbprm.lock);
+	if (srv->lb_tree) {
 		/* we might have been waiting for a while on the lock above
 		 * so it's worth testing again because other threads are very
 		 * likely to have released a connection or taken one leading
 		 * to our target value (50% of the case in measurements).
 		 */
-		inflight = _HA_ATOMIC_LOAD(&s->served) + _HA_ATOMIC_LOAD(&s->queue.length);
-		eweight = _HA_ATOMIC_LOAD(&s->cur_eweight);
-		new_key = inflight ? (inflight + 1) * SRV_EWGHT_MAX / (eweight ? eweight : 1) : 0;
-		if (!s->lb_node.node.leaf_p || s->lb_node.key != new_key) {
-			eb32_delete(&s->lb_node);
-			s->lb_node.key = new_key;
-			eb32_insert(s->lb_tree, &s->lb_node);
+
+		unsigned long long inflight = _HA_ATOMIC_LOAD(&srv->served) + _HA_ATOMIC_LOAD(&srv->queue.length);
+
+		if (!srv->lb_node.node.leaf_p || srv->lb_node.key != inflight) {
+			struct fwlc_group *group = srv->lb_group;
+			uint32_t old_srv_key = srv->lb_node.key;
+			uint32_t new_srv_key = inflight;
+
+			/* Reposition server */
+			eb32_delete(&srv->lb_node);
+			srv->lb_node.key = new_srv_key;
+			eb32_insert(srv->lb_tree, &srv->lb_node);
+
+			/* Reposition group */
+			eb64_delete(&group->leastconn_node);
+			group->total_inflight += (new_srv_key - old_srv_key);
+			/* Extend to uint64_t and multiply nominator by 2^32 to get maximum precision */
+			group->leastconn_node.key = (((uint64_t) group->total_inflight) << 32) / group->total_eweight;
+			eb64_insert(group->leastconn_tree, &group->leastconn_node);
 		}
 	}
-	HA_RWLOCK_WRUNLOCK(LBPRM_LOCK, &s->proxy->lbprm.lock);
+	HA_RWLOCK_WRUNLOCK(LBPRM_LOCK, &srv->proxy->lbprm.lock);
 }
 
 /* This function updates the server trees according to server <srv>'s new
@@ -116,8 +195,8 @@ static void fwlc_set_server_status_down(struct server *srv)
 
 	if (srv_willbe_usable(srv))
 		goto out_update_state;
-	HA_RWLOCK_WRLOCK(LBPRM_LOCK, &p->lbprm.lock);
 
+	HA_RWLOCK_WRLOCK(LBPRM_LOCK, &p->lbprm.lock);
 
 	if (!srv_currently_usable(srv))
 		/* server was already down */
@@ -145,9 +224,8 @@ static void fwlc_set_server_status_down(struct server *srv)
 	}
 
 	fwlc_dequeue_srv(srv);
-	fwlc_remove_from_tree(srv);
 
-out_update_backend:
+ out_update_backend:
 	/* check/update tot_used, tot_weight */
 	update_backend_weight(p);
 	HA_RWLOCK_WRUNLOCK(LBPRM_LOCK, &p->lbprm.lock);
@@ -182,7 +260,6 @@ static void fwlc_set_server_status_up(struct server *srv)
 		goto out_update_backend;
 
 	if (srv->flags & SRV_F_BACKUP) {
-		srv->lb_tree = &p->lbprm.fwlc.bck;
 		p->lbprm.tot_wbck += srv->next_eweight;
 		p->srv_bck++;
 
@@ -203,13 +280,11 @@ static void fwlc_set_server_status_up(struct server *srv)
 			}
 		}
 	} else {
-		srv->lb_tree = &p->lbprm.fwlc.act;
 		p->lbprm.tot_wact += srv->next_eweight;
 		p->srv_act++;
 	}
 
-	/* note that eweight cannot be 0 here */
-	fwlc_queue_srv(srv, srv->next_eweight);
+	fwlc_queue_srv(srv);
 
  out_update_backend:
 	/* check/update tot_used, tot_weight */
@@ -240,7 +315,7 @@ static void fwlc_update_server_weight(struct server *srv)
 	 * there are some computations to perform to find a new place and
 	 * possibly a new tree for this server.
 	 */
-	 
+
 	old_state = srv_currently_usable(srv);
 	new_state = srv_willbe_usable(srv);
 
@@ -259,18 +334,15 @@ static void fwlc_update_server_weight(struct server *srv)
 
 	HA_RWLOCK_WRLOCK(LBPRM_LOCK, &p->lbprm.lock);
 
-	if (srv->lb_tree)
-		fwlc_dequeue_srv(srv);
+	fwlc_dequeue_srv(srv);
 
 	if (srv->flags & SRV_F_BACKUP) {
 		p->lbprm.tot_wbck += srv->next_eweight - srv->cur_eweight;
-		srv->lb_tree = &p->lbprm.fwlc.bck;
 	} else {
 		p->lbprm.tot_wact += srv->next_eweight - srv->cur_eweight;
-		srv->lb_tree = &p->lbprm.fwlc.act;
 	}
 
-	fwlc_queue_srv(srv, srv->next_eweight);
+	fwlc_queue_srv(srv);
 
 	update_backend_weight(p);
 	HA_RWLOCK_WRUNLOCK(LBPRM_LOCK, &p->lbprm.lock);
@@ -284,17 +356,26 @@ static void fwlc_update_server_weight(struct server *srv)
  */
 void fwlc_init_server_tree(struct proxy *p)
 {
-	struct server *srv;
 	struct eb_root init_head = EB_ROOT;
+
+	struct server *srv;
+
+	p->lbprm.fwlc.weights = init_head;
+	HA_RWLOCK_INIT(&p->lbprm.fwlc.weights_lock);
+
+	p->lbprm.fwlc.act_leastconn = init_head;
+	p->lbprm.fwlc.bck_leastconn = init_head;
 
 	p->lbprm.set_server_status_up   = fwlc_set_server_status_up;
 	p->lbprm.set_server_status_down = fwlc_set_server_status_down;
 	p->lbprm.update_server_eweight  = fwlc_update_server_weight;
-	p->lbprm.server_take_conn = fwlc_srv_reposition;
-	p->lbprm.server_drop_conn = fwlc_srv_reposition;
+	p->lbprm.server_take_conn = fwlc_reposition_srv_and_group;
+	p->lbprm.server_drop_conn = fwlc_reposition_srv_and_group;
+	p->lbprm.register_uweight = fwlc_register_uweight;
 
 	p->lbprm.wdiv = BE_WEIGHT_SCALE;
 	for (srv = p->srv; srv; srv = srv->next) {
+		fwlc_register_uweight(p, srv->uweight);
 		srv->next_eweight = (srv->uweight * p->lbprm.wdiv + p->lbprm.wmult - 1) / p->lbprm.wmult;
 		srv_lb_commit_status(srv);
 	}
@@ -302,70 +383,79 @@ void fwlc_init_server_tree(struct proxy *p)
 	recount_servers(p);
 	update_backend_weight(p);
 
-	p->lbprm.fwlc.act = init_head;
-	p->lbprm.fwlc.bck = init_head;
-
-	/* queue active and backup servers in two distinct groups */
 	for (srv = p->srv; srv; srv = srv->next) {
 		if (!srv_currently_usable(srv))
 			continue;
-		srv->lb_tree = (srv->flags & SRV_F_BACKUP) ? &p->lbprm.fwlc.bck : &p->lbprm.fwlc.act;
-		fwlc_queue_srv(srv, srv->next_eweight);
+		fwlc_queue_srv(srv);
 	}
 }
 
-/* Return next server from the FWLC tree in backend <p>. If the tree is empty,
- * return NULL. Saturated servers are skipped.
+/* Return next server for backend <p>. First pick the least connected group,
+ * where load of the group is proportional to its total number of inflight
+ * requests, but inversely proportional to the size of the group and its
+ * weight: load = (inflight/(size*weight)). If the tree is empty, return NULL.
+ * Saturated servers are skipped. If all servers in a group are saturated,
+ * other groups than the least loaded one will also be considered.
  *
  * The lbprm's lock will be used in R/O mode. The server's lock is not used.
  */
 struct server *fwlc_get_next_server(struct proxy *p, struct server *srvtoavoid)
 {
-	struct server *srv, *avoided;
-	struct eb32_node *node;
+	struct server *sel_srv, *avoided;
+	struct eb64_node *group_node;
 
-	srv = avoided = NULL;
+	sel_srv = avoided = NULL;
 
 	HA_RWLOCK_RDLOCK(LBPRM_LOCK, &p->lbprm.lock);
-	if (p->srv_act)
-		node = eb32_first(&p->lbprm.fwlc.act);
-	else if (p->lbprm.fbck) {
-		srv = p->lbprm.fbck;
+	if (p->srv_act) {
+		group_node = eb64_first(&p->lbprm.fwlc.act_leastconn);
+		if (!group_node)
+			goto out;
+	} else if (p->lbprm.fbck) {
+		sel_srv = p->lbprm.fbck;
 		goto out;
-	}
-	else if (p->srv_bck)
-		node = eb32_first(&p->lbprm.fwlc.bck);
-	else {
-		srv = NULL;
+	} else if (p->srv_bck) {
+		group_node = eb64_first(&p->lbprm.fwlc.bck_leastconn);
+		if (!group_node)
+			goto out;
+	} else {
+		sel_srv = NULL;
 		goto out;
 	}
 
-	while (node) {
-		/* OK, we have a server. However, it may be saturated, in which
-		 * case we don't want to reconsider it for now, so we'll simply
-		 * skip it. Same if it's the server we try to avoid, in which
-		 * case we simply remember it for later use if needed.
-		 */
-		struct server *s;
+	while (group_node) {
+		struct fwlc_group *group = eb64_entry(group_node, struct fwlc_group, leastconn_node);
 
-		s = eb32_entry(node, struct server, lb_node);
-		if (!s->maxconn || s->served + s->queue.length < srv_dynamic_maxconn(s) + s->maxqueue) {
-			if (s != srvtoavoid) {
-				srv = s;
-				break;
+		struct eb32_node *srv_node = eb32_first(&group->srv_tree);
+		while (srv_node) {
+			/* OK, we have a server. However, it may be saturated, in which
+			 * case we don't want to reconsider it for now, so we'll simply
+			 * skip it. Same if it's the server we try to avoid, in which
+			 * case we simply remember it for later use if needed.
+			 */
+			struct server *srv = eb32_entry(srv_node, struct server, lb_node);
+
+			if (!srv->maxconn || srv->served + srv->queue.length < srv_dynamic_maxconn(srv) + srv->maxqueue) {
+				if (srv != srvtoavoid) {
+					sel_srv = srv;
+					goto out;
+				}
+				avoided = srv;
 			}
-			avoided = s;
+
+			srv_node = eb32_next(srv_node);
 		}
-		node = eb32_next(node);
+
+		group_node = eb64_next(group_node);
 	}
 
-	if (!srv)
-		srv = avoided;
+	if (!sel_srv)
+		sel_srv = avoided;
+
  out:
 	HA_RWLOCK_RDUNLOCK(LBPRM_LOCK, &p->lbprm.lock);
-	return srv;
+	return sel_srv;
 }
-
 
 /*
  * Local variables:

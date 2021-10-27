@@ -169,6 +169,7 @@ struct lbprm {
 	void (*set_server_status_down)(struct server *); /* to be called after status changes to DOWN // srvlock */
 	void (*server_take_conn)(struct server *);       /* to be called when connection is assigned */
 	void (*server_drop_conn)(struct server *);       /* to be called when connection is dropped */
+	void (*register_uweight)(struct proxy *, unsigned uweight);      /* to be called when uweight is about to be used in a server */
 };
 
 #endif /* _HAPROXY_BACKEND_T_H */
