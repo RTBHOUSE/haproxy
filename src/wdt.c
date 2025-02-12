@@ -265,8 +265,8 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ 0, NULL, NULL },
 }};
 
-INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws);
-REGISTER_POST_CHECK(init_wdt);
-REGISTER_PER_THREAD_INIT(init_wdt_per_thread);
-REGISTER_PER_THREAD_DEINIT(deinit_wdt_per_thread);
+// INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws);
+// REGISTER_POST_CHECK(init_wdt);
+// REGISTER_PER_THREAD_INIT(init_wdt_per_thread);
+// REGISTER_PER_THREAD_DEINIT(deinit_wdt_per_thread);
 #endif
